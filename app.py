@@ -11,10 +11,10 @@ from langchain_community.vectorstores import FAISS
 from langchain.chains import create_retrieval_chain
 from langchain_community.document_loaders import WebBaseLoader
 
-import cohere
+from langchain_cohere import CohereEmbeddings
 
 
-# Load API keys from .env file
+# Load environment variables
 load_dotenv()
 
 COHERE_API_KEY = os.getenv("COHERE_API_KEY")
@@ -29,7 +29,6 @@ st.title("Groq RAG Chatbot")
 
 
 # Initialize Groq LLM
-# Using a currently supported model to avoid deprecation issues
 llm = ChatGroq(
     groq_api_key=GROQ_API_KEY,
     model_name="llama-3.1-8b-instant",
@@ -38,11 +37,12 @@ llm = ChatGroq(
 
 
 # Prompt template
-# We explicitly tell the model to answer only from the provided context
 prompt = ChatPromptTemplate.from_template(
 """
 Answer the question only using the information from the context below.
-If the answer is not present in the context, say that the information is not available.
+
+If the answer is not present in the context, say:
+"The information is not available in the provided context."
 
 <context>
 {context}
@@ -53,68 +53,47 @@ Question: {input}
 )
 
 
-# Cohere embedding setup
-co = cohere.Client(COHERE_API_KEY)
+# Initialize Cohere Embeddings
+embeddings = CohereEmbeddings(
+    cohere_api_key=COHERE_API_KEY,
+    model="embed-english-v3.0"
+)
 
 
-class MyCohereEmbedder:
-    # Converts multiple documents into embeddings
-    def embed_documents(self, texts):
-        response = co.embed(
-            texts=texts,
-            model="embed-english-v3.0",
-            input_type="search_document"
-        )
-        return response.embeddings
-
-    # Converts user query into embedding
-    def embed_query(self, text):
-        response = co.embed(
-            texts=[text],
-            model="embed-english-v3.0",
-            input_type="search_query"
-        )
-        return response.embeddings[0]
-
-    # Allows the class to be used directly as a callable
-    def __call__(self, text):
-        return self.embed_query(text)
-
-
-# Function to create vector embeddings from a given URL
+# Function to create vector embeddings
 def vector_embeddings(user_url):
 
-    # Rebuild vector store only if URL changes
+    # rebuild vectorstore only if URL changes
     if "vectors" not in st.session_state or st.session_state.get("last_url") != user_url:
 
         st.session_state.last_url = user_url
 
-        # Load website content
-        loader = WebBaseLoader(user_url)
-        documents = loader.load()
+        with st.spinner("Loading website content..."):
 
-        # Split into manageable chunks
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200
-        )
+            # Load webpage
+            loader = WebBaseLoader(user_url)
+            documents = loader.load()
 
-        final_documents = text_splitter.split_documents(documents)
+            # Split documents
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000,
+                chunk_overlap=200
+            )
 
-        # Create embeddings
-        embeddings = MyCohereEmbedder()
+            final_documents = text_splitter.split_documents(documents)
 
-        # Store in FAISS vector database
-        vectors = FAISS.from_documents(final_documents, embeddings)
+            # Create FAISS vector store
+            vectors = FAISS.from_documents(final_documents, embeddings)
 
-        st.session_state.vectors = vectors
+            st.session_state.vectors = vectors
 
 
-# User input fields
+# User Inputs
 user_url = st.text_input("Enter website URL")
 user_question = st.text_input("Ask a question based on the website content")
 
 
+# Create embeddings button
 if st.button("Create Embeddings") and user_url:
     vector_embeddings(user_url)
     st.success("Vector database created successfully.")
@@ -125,14 +104,19 @@ if user_question and "vectors" in st.session_state:
 
     document_chain = create_stuff_documents_chain(llm, prompt)
 
-    retriever = st.session_state.vectors.as_retriever(search_kwargs={"k": 4})
+    retriever = st.session_state.vectors.as_retriever(
+        search_kwargs={"k": 4}
+    )
 
     retrieval_chain = create_retrieval_chain(retriever, document_chain)
 
     start_time = time.process_time()
 
     try:
-        response = retrieval_chain.invoke({"input": user_question})
+
+        response = retrieval_chain.invoke({
+            "input": user_question
+        })
 
         end_time = time.process_time()
 
@@ -141,12 +125,16 @@ if user_question and "vectors" in st.session_state:
 
         st.write(f"Response Time: {round(end_time - start_time, 2)} seconds")
 
-        # Optional: show retrieved documents for transparency
+
+        # show retrieved docs
         with st.expander("View Retrieved Documents"):
+
             for i, doc in enumerate(response["context"]):
-                st.write(f"Document {i + 1}")
+
+                st.write(f"Document {i+1}")
                 st.write(doc.page_content)
                 st.write("------")
 
     except Exception as e:
+
         st.error(f"Something went wrong: {str(e)}")
